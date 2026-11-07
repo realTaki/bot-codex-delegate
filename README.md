@@ -44,7 +44,7 @@ The installer starts the server with sandbox `workspace-write` **with network ac
 
 Full access is **opt-in only**: `CODEX_DELEGATE_FULL_ACCESS=1` switches the server to `danger-full-access` with approvals `never`. Then Codex can read and change any file your user can, including SSH keys, API tokens and other projects on the machine. Only turn it on for a throwaway computer and work you trust.
 
-The driver has the same defaults per thread, and it **declines** approval requests unless you pass `--approve accept` (or `acceptForSession`). `--no-network` and `--sandbox read-only` tighten it; `start --danger-full-access` is the opt-in escape hatch with the same risk as above.
+The scoped driver defaults new coding threads to workspace-write/on-request in an explicit project cwd, and it **declines** approval requests unless you pass `--approve accept` (or `acceptForSession`). Coding resumes now require `--intent coding --cwd PROJECT`; effective scope is verified before a turn. `--intent read-only` (or new-thread `--sandbox read-only`) preserves audit intent; `--no-network` tightens new coding threads. The driver rejects full access and outside-project writable roots. See the [scope and migration details](scripts/codex_ws.README.md#scope-preflight-and-migration-stable-01660-protocol); installer configuration is unchanged.
 
 The endpoint, state dir, log path, tmux session name and model are all env vars; see the top of [`install-codex-app-server.sh`](scripts/install-codex-app-server.sh). The server only listens on loopback because it has no auth.
 
@@ -75,7 +75,8 @@ What's in here:
 
 ```bash
 python3 scripts/codex_ws.py start --cwd ./my-repo "first task"      # prints threadId
-python3 scripts/codex_ws.py turn <threadId> "next task" --effort medium
+python3 scripts/codex_ws.py turn --intent coding --cwd ./my-repo --effort medium <threadId> "next task"
+python3 scripts/codex_ws.py turn --intent read-only <threadId> "audit only; change nothing"
 python3 scripts/codex_ws.py steer <threadId> <turnId> "also update the changelog"
 python3 scripts/codex_ws.py interrupt <threadId> <turnId>
 python3 scripts/codex_ws.py list --cwd ./my-repo
@@ -102,7 +103,7 @@ Driver settings: `--host`/`--port` (`CODEX_WS_HOST`/`CODEX_WS_PORT`, default `12
 
 **安全默认值。** 默认沙箱 `workspace-write` 且允许联网，审批策略 `on-request`：Codex 在项目目录里写文件，越界之前先问。模型用你自己 Codex 配置里的。完全权限只能显式开启：`CODEX_DELEGATE_FULL_ACCESS=1` 会改成 `danger-full-access` + 审批 `never`，这时 Codex 能读写你这个用户能碰到的任何文件，包括别处的 SSH 密钥、API token 和其他项目。只在一次性的机器、可信的任务上用。地址、目录、日志、tmux 会话名、模型都能用环境变量改，服务只监听本机（它没有鉴权）。
 
-**安装。** 把上面那个 `SKILL.md` 链接发给你的 Grok Bot，让它存成技能。技能会让 bot 在自己电脑上运行 `scripts/install-codex-app-server.sh`（可重复运行），需要先装好并登录 Codex CLI。等待者用的是 `scripts/codex-turn`（`codex_ws.py turn` 连续 15 分钟没有新事件就会放弃，可用 `--turn-timeout` 调；长任务用这个）。驱动脚本 `scripts/codex_ws.py`（只用标准库）负责 start / turn / steer / interrupt / list / read，地址用 `--host`/`--port` 或 `CODEX_WS_HOST`/`CODEX_WS_PORT`，模型用 `start --model` 或 `CODEX_WS_MODEL`（默认用服务端的）。驱动默认拒绝审批请求，`--approve accept` 才放行；`--danger-full-access` 同样只能显式开启。
+**安装。** 把上面那个 `SKILL.md` 链接发给你的 Grok Bot，让它存成技能。技能会让 bot 在自己电脑上运行 `scripts/install-codex-app-server.sh`（可重复运行），需要先装好并登录 Codex CLI。等待者用的是 `scripts/codex-turn`（`codex_ws.py turn` 连续 15 分钟没有新事件就会放弃，可用 `--turn-timeout` 调；长任务用这个）。驱动脚本 `scripts/codex_ws.py`（只用标准库）负责 start / turn / steer / interrupt / list / read，地址用 `--host`/`--port` 或 `CODEX_WS_HOST`/`CODEX_WS_PORT`，模型用 `start --model` 或 `CODEX_WS_MODEL`（默认用服务端的）。驱动默认拒绝审批请求，`--approve accept` 才放行。恢复编码任务必须明确传入 `--intent coding --cwd 项目目录`，发送新 turn 前校验实际范围；只读审查用 `--intent read-only`，不会自动升级。驱动现在拒绝完全权限及项目外写入根目录；安装器和全局配置保持不变，迁移限制见驱动文档。
 
 ## License
 

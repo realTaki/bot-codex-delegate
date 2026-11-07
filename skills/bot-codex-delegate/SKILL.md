@@ -53,37 +53,52 @@ WebSocket, JSON-RPC 2.0, one JSON message per text frame. Health: `/readyz`, `/h
 
 - `initialize {clientInfo}` → notification `initialized`. Pass
   `capabilities.experimentalApi: true` only if you need experimental methods.
-- `thread/start {cwd, sandbox: "workspace-write"}`. Always pass the project's `cwd`; never rely
-  on the server's own directory. Save `thread.id`.
+- `thread/start {cwd, sandbox: "workspace-write", approvalPolicy: "on-request"}` for coding.
+  Always pass the project's `cwd`; never rely on the server's own directory. Save `thread.id`.
 - `turn/start {threadId, input: [{type: "text", text}], effort?}` → stream events → wait for
   `turn/completed`. Effort and model can be set per turn.
-- A new connection must `thread/resume {threadId}` before any `turn/*` on an existing thread.
+- On an existing thread, before a new coding turn resume with explicit project `cwd`, `sandbox: "workspace-write"`, and
+  `approvalPolicy: "on-request"`. Validate the effective response before `turn/start`; the scoped
+  drivers below do this. Deliberate read-only tasks use read-only intent instead.
 - With approval policy `on-request`, the server may send approval requests (commands, file
   changes) to the client. The driver must answer them (accept or decline) or the turn waits.
 
 ### Driver: `scripts/codex_ws.py`
 One stdlib-only Python file ([docs](../../scripts/codex_ws.README.md)). Global flags go **before**
-the subcommand; events stream to stderr, JSON results to stdout.
+the subcommand; subcommand options precede positional arguments. Events stream to stderr, JSON results
+to stdout. In these examples, `<repo>` is the explicit **absolute authorized project directory**,
+including when the command runs after `cd` or from a separate job folder.
+Use absolute checkout paths for `<path>` and `<delegate-checkout>` below as well.
 
 ```bash
 D=bot-codex-delegate/scripts/codex_ws.py
 python3 $D start --cwd <repo> [--model <model>] [--effort medium] ["<first task>"]   # prints threadId
-python3 $D turn <threadId> "<task>" [--effort medium] [--steer "<extra>"] [--interrupt-after SEC]
+python3 $D turn --intent coding --cwd <repo> [--effort medium] [--steer "<extra>"] [--interrupt-after SEC] <threadId> "<task>"
+python3 $D turn --intent read-only --cwd <repo> <threadId> "<audit; change nothing>"
 python3 $D steer <threadId> <turnId> "<extra>"      # from another process, mid-turn
 python3 $D interrupt <threadId> <turnId>
 python3 $D list [--cwd <repo>] [--limit 20]         # read-only
-python3 $D read <threadId> [--turns]                # read-only
+python3 $D read [--turns] <threadId>                # read-only
 python3 $D --state threads.json saved               # optional local registry (start --label ...)
 ```
 
 - Endpoint: `--host`/`--port` or `CODEX_WS_HOST`/`CODEX_WS_PORT` (default `127.0.0.1:4500`).
 - Model: `start --model` or `CODEX_WS_MODEL`; unset means the server's default.
 - Registry: `--state FILE` or `CODEX_WS_STATE`; off unless set.
-- Safe defaults: `workspace-write` with network, `approvalPolicy: on-request`, and approval
+- New coding defaults: explicit project cwd, `workspace-write` with network, `approvalPolicy: on-request`, and approval
   requests are **declined**. `--approve accept|acceptForSession` answers them yes; `--no-network`
-  or `--sandbox read-only` tighten it.
-- `start --danger-full-access` (and `--approval never`) are opt-in only and need the user's
-  explicit OK: Codex could then read, change or send any file the server's user can reach.
+  or new-thread `--sandbox read-only` tighten it.
+- Coding resumes require **both `--intent coding --cwd <repo>`**; `cd` alone is insufficient.
+  `--intent read-only` deliberately requests read-only. Omitted resume intent preserves only a
+  confirmed read-only thread, and `--cwd` alone is rejected. Intent is never inferred from task text.
+- Before a new turn, the driver validates effective cwd, sandbox, writable roots and approval policy.
+  Unknown or conflicting state fails with `ScopeError`; do not retry through another entry point.
+  Explicit coding intent plus cwd can authorize **future new work** in an idle historical read-only
+  thread. Prior rejected actions are never replayed; historical instructions are not rewritten.
+- The scoped driver rejects `--danger-full-access`, outside-project writable roots, and coding with
+  `--approval never`/`untrusted`, even though the installer retains its separate legacy full-access option.
+  Approval requests still default to decline; driver replies log `source=driver` without rewriting
+  server rejection messages. See the [migration limits](../../scripts/codex_ws.README.md#scope-preflight-and-migration-stable-01660-protocol).
 - `turn` resumes the thread first, prints the `turnId` right away, and exits 0 on `completed` or
   `interrupted`. It blocks until `turn/completed`, **but gives up with `TimeoutError` after
   `--turn-timeout` seconds (default 900, env `CODEX_WS_TURN_TIMEOUT`) with no new event** (same
@@ -96,17 +111,23 @@ safe defaults). It keeps one connection open and waits as long as the turn runs.
 
 ```bash
 T=bot-codex-delegate/scripts/codex-turn
-python3 $T <threadId> "<task>" [--effort medium] [--max-hours 6] [--interrupt-at-deadline]
+python3 $T --intent coding --cwd <repo> [--effort medium] [--max-hours 6] [--interrupt-at-deadline] <threadId> "<task>"
+python3 $T --intent read-only --cwd <repo> <threadId> "<audit; change nothing>"
 python3 $T --new --cwd <repo> [--model <model>] [--effort medium] "<first task>"
 ```
+
+Keep all CLI options before the contiguous `<threadId> "<task>"` pair (or the single prompt with
+`--new`). Do not interleave options between thread ID and prompt; this avoids argparse's positional
+intermix limitation. The wrapper uses the same scope preflight as `codex_ws.py`.
 
 stdout is JSON lines: `{"threadId","turnId"}` right away, then
 `{"threadId","turnId","status","error","durationMs","finalMessage","changedFiles"}`
 (`changedFiles` from `git status --porcelain` in the thread's `cwd`). Events go to stderr.
-Exit 0 on `completed`/`interrupted`, 1 on `failed`, 2 on a connection or RPC error (a
+Exit 0 on `completed`/`interrupted`, 1 on `failed`, 2 on a scope, connection or RPC error (a
 `{"status":"error"}` line, e.g. unknown thread or server down), 3 when `--max-hours` passed (the turn is left
-running unless `--interrupt-at-deadline` was given). `--new` always uses the safe defaults; for
-other thread settings create the thread with `codex_ws.py start` first, then pass its id.
+running unless `--interrupt-at-deadline` was given). `--new` defaults to coding; add `--intent read-only`
+for a new audit. A thread created with `codex_ws.py start` still needs explicit coding intent and cwd
+when resumed through this wrapper.
 
 ## 3. Dispatch through a waiter subagent
 The main bot never waits on Codex itself, and never uses a `block_until_ms: 0` background
@@ -119,10 +140,11 @@ command as its way of waiting (the computer can sleep under it and freeze Codex)
    - Run the command in a **foreground** Shell call with `block_until_ms: 760000` (the per-call
      limit is 13 minutes), events to a log file:
      ```bash
-     cd <repo> && python3 <path>/scripts/codex-turn <threadId> "<task>" --effort medium \
-       --max-hours <N> 2>> /tmp/<session-name>.events.log
+     cd <repo> && python3 <path>/scripts/codex-turn --intent coding --cwd <repo> \
+       --effort medium --max-hours <N> <threadId> "<task>" 2>> /tmp/<session-name>.events.log
      ```
-     (`--new --cwd <repo> "<task>"` instead of `<threadId>` for a new session.)
+     (For a new coding session, add `--new` and omit `<threadId>`. For a deliberate audit, choose
+     `--intent read-only` instead of coding, whether new or resumed.)
    - If the call hasn't returned after ~13 minutes, it moves to the background and keeps running.
      Then wait on that same command with back-to-back `AwaitShell` calls (its shell id,
      `block_until_ms: 760000`) until it exits. No pauses and no commentary between waits.
@@ -147,7 +169,7 @@ with it, following bot-keepalive's steps:
 
 ```bash
 J=~/.keepalive/codex/<session-name>; mkdir -p "$J" ~/.keepalive/jobs && cd "$J"
-setsid nohup bash -c 'python3 <path>/scripts/codex-turn <threadId> "<task>" \
+setsid nohup bash -c 'python3 <path>/scripts/codex-turn --intent coding --cwd <repo> <threadId> "<task>" \
   > out.json 2> events.log; touch DONE' < /dev/null > /dev/null 2>&1 &
 echo "$! $J" > ~/.keepalive/jobs/<session-name>
 ```
@@ -173,19 +195,30 @@ measured about 1.8M tokens a day for a watcher running all day). Short turns cos
 A session keeps the project context; a new one re-reads the whole project. Keep **one named
 session per project × task type**, and send every new prompt of that type into it.
 
+Session-helper examples here refer to the repository's standalone `scripts/codex-sessions`, which
+does not import `codex_ws.py`. Use its explicit path to avoid a different helper on PATH:
+
+```bash
+S=<delegate-checkout>/scripts/codex-sessions
+```
+
+Installed helpers and installed bot skills are separate deployments; updating this checkout does
+not migrate them. See the [helper compatibility note](../../scripts/codex_ws.README.md#session-helper-compatibility).
+
 - **Name**: `<bot>-<project>-<task type>`, for example `mybot-website-frontend`. Bot name as it
   appears in the app, project = repo or folder name, task type = a short stable label. The name
   is the thread's Codex title, so other bots and the user see it.
 - **Find**: `thread/list {searchTerm: "<bot>-<project>", sourceKinds: ["cli","vscode","exec","appServer"]}`
   (the default list leaves out `codex exec` sessions). Filter by folder with `cwd`.
-  `codex-sessions find <term>` does the same.
-- **Found**: `thread/resume {threadId}`, then `turn/start`.
+  `python3 "$S" find <term>` does the same.
+- **Found**: for coding, use `codex-turn --intent coding --cwd <repo> <threadId> "<task>"`;
+  for a deliberate audit use `--intent read-only`. Resume scope must be verified before a new turn.
 - **None fits**: `thread/start` with the right `cwd`, run the first turn, then
-  `thread/name/set {threadId, name}` (`codex-sessions name <id> "<name>"`). A new thread is not
+  `thread/name/set {threadId, name}` (`python3 "$S" name <id> "<name>"`). A new thread is not
   listed until after its first turn.
 - **Long context** (slow turns, `contextWindowExceeded`): `thread/compact/start {threadId}`
-  (`codex-sessions compact <id>`). The session and its name stay.
-- **Task type done**: `thread/archive {threadId}` (`codex-sessions archive <id>`). `--archived`
+  (`python3 "$S" compact <id>`). The session and its name stay.
+- **Task type done**: `thread/archive {threadId}` (`python3 "$S" archive <id>`). `--archived`
   lists it, `unarchive` brings it back.
 - `codex exec` sessions live in the same store; name them the same way and resume them with
   `codex exec resume <id>`.
@@ -200,7 +233,8 @@ session per project × task type**, and send every new prompt of that type into 
   progress-check routine, or a detached run nobody watches.
 - One waiter per running turn. Never two waiters, or two writers, on one working tree.
 - Verify the launch before telling anyone it is running.
-- Keep safe defaults. Full access only when the user asks for it.
+- Keep scoped defaults: explicit project cwd and workspace-write/on-request for coding;
+  deliberate audits stay read-only. Full access is unsupported by the scoped driver.
 - Never paste secrets into prompts or print auth files.
 - The cloud computer sleeps when no bot turn is active, and a sleeping computer freezes Codex
   too. The waiter exists to prevent that; don't end it early.

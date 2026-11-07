@@ -6,7 +6,8 @@ Built on scripts/codex_ws.py (imported as a library, same flags and env vars). U
 this keeps one connection open and waits through any quiet stretch, up to --max-hours. Made for a waiter
 subagent that sits in a foreground Shell call so the computer stays awake.
 
-  codex-turn <threadId> "<prompt>" [--effort E]                 # existing thread (resumed first)
+  codex-turn --intent coding --cwd DIR [--effort E] <threadId> "<prompt>"
+  codex-turn --intent read-only <threadId> "<audit>"            # no write upgrade
   codex-turn --new --cwd DIR [--model M] [--effort E] "<prompt>" # new thread, safe defaults
   Global: --host/--port (CODEX_WS_HOST/CODEX_WS_PORT), --approve accept|acceptForSession|decline|cancel
           --max-hours H (default 6)   --interrupt-at-deadline   -v
@@ -14,8 +15,9 @@ subagent that sits in a foreground Shell call so the computer stays awake.
 stdout (JSON lines): {"threadId","turnId"} right away, then a summary:
   {"threadId","turnId","status","error","durationMs","finalMessage","changedFiles"}
 Exit: 0 completed/interrupted, 1 failed, 2 connection/RPC error ({"status":"error"}), 3 deadline hit (turn left running unless
---interrupt-at-deadline). New threads use workspace-write + network, approvalPolicy on-request,
-approval requests declined; for anything else create the thread with codex_ws.py start first.
+--interrupt-at-deadline). New coding threads use workspace-write + network and on-request.
+Resumed coding requires explicit intent and cwd; omitted intent preserves read-only.
+Effective scope is verified before turn/start. Approval requests default to decline.
 """
 import argparse, json, os, subprocess, sys, time
 
@@ -41,7 +43,9 @@ def main(argv=None):
     ap.add_argument("--approve", default="decline", choices=["accept", "acceptForSession", "decline", "cancel"])
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--new", action="store_true", help="start a new thread (needs --cwd)")
-    ap.add_argument("--cwd", help="working tree for a new thread")
+    ap.add_argument("--cwd", help="authorized project directory (required for new threads and coding resume)")
+    ap.add_argument("--intent", choices=["coding", "read-only"],
+                    help="new threads default to coding; resumed coding needs explicit intent and cwd")
     ap.add_argument("--model", default=codex_ws.DEFAULT_MODEL, help="new thread only; default: server's")
     ap.add_argument("--effort")
     ap.add_argument("--max-hours", type=float, default=6.0)
@@ -56,16 +60,20 @@ def main(argv=None):
         if len(a.args) != 2:
             ap.error('expected <threadId> "<prompt>"')
         thread, prompt = a.args
+    if a.intent == "coding" and not a.cwd:
+        raise codex_ws.ScopeError("coding requires explicit --cwd PROJECT")
+    if a.cwd is not None:
+        codex_ws.project_cwd(a.cwd, coding=a.intent == "coding" or (a.new and a.intent is None))
 
     c = codex_ws.Codex(a.host, a.port, on_event=codex_ws.printer(a.verbose), approve=a.approve)
-    c.connect(name="codex-turn")
     try:
+        c.connect(name="codex-turn")
         if a.new:
-            r = c.thread_start(a.cwd, a.model, effort=a.effort)
-            thread, cwd = r["thread"]["id"], r.get("cwd") or os.path.abspath(a.cwd)
+            r = c.thread_start(a.cwd, a.model, effort=a.effort, intent=a.intent)
+            thread, cwd = r["thread"]["id"], r["cwd"]
         else:
-            r = c.thread_resume(thread, excludeTurns=True)
-            cwd = r.get("cwd") or (r.get("thread") or {}).get("cwd")
+            r = c.thread_resume(thread, cwd=a.cwd, intent=a.intent, excludeTurns=True)
+            cwd = r["cwd"]
         turn = c.turn_start(thread, prompt, effort=a.effort)["turn"]
         print(json.dumps({"threadId": thread, "turnId": turn["id"]}), flush=True)
 
@@ -104,7 +112,7 @@ def run():
         return main()
     except KeyboardInterrupt:
         return 130
-    except (codex_ws.RPCError, codex_ws.WSClosed, OSError) as e:
+    except (codex_ws.ScopeError, codex_ws.RPCError, codex_ws.WSClosed, OSError) as e:
         print(json.dumps({"status": "error", "error": f"{type(e).__name__}: {e}"},
                          ensure_ascii=False), flush=True)
         return 2
