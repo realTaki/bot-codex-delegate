@@ -1,5 +1,7 @@
 # bot-codex-delegate
 
+> **This repository is no longer maintained and is archived.** The author moved coding work to an Oracle cloud VM for a more stable machine that does not freeze the way the previous cloud computer did. The docs and scripts here are left as-is for reference; they will not receive updates.
+
 **Let your [Grok Bot](https://x.ai/bot) run Codex the way a Cursor Project runs cloud agents: hand off the work, get woken when it's done.**
 
 The bot is the coordinator. A resident `codex app-server` on the bot's cloud computer is its worker. A low-effort waiter keeps the computer awake while Codex works. Codex spends the quota, not the bot.
@@ -87,6 +89,8 @@ Driver settings: `--host`/`--port` (`CODEX_WS_HOST`/`CODEX_WS_PORT`, default `12
 ---
 
 ## 中文说明
+
+> **本仓库已停止维护并已 archive。** 作者已把相关工作迁到一台 Oracle 云主机上，以获得更稳定、不会像原先那台云电脑那样挂掉的环境。这里的文档和脚本仅供参考，不再更新。
 
 **让 Grok Bot 像 Cursor Project 用云端 agent 一样用 Codex：派活出去，干完了叫醒它。** Bot 当协调者，云电脑上常驻的 `codex app-server` 当干活的 agent，一个 low effort 的等待 subagent 让电脑在 Codex 干活时保持清醒。额度花在 Codex 干活上，不花在 bot 盯着上。
 
